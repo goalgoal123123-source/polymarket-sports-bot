@@ -475,8 +475,11 @@ cython_debug/
 #.idea/
 
 # --- CI pipeline: keep small result files, ignore raw bulk data ---
+# NOTE: a file cannot be re-included if its parent dir is excluded,
+# so un-exclude data/ first, then ignore its contents selectively.
+data/
+!data/
+data/*
 !data/directional_arbitrage.json
 !data/arbitrage_comparison.json
 !data/trading/
-!data/trading/*.jsonl
-!data/trading/*.json
