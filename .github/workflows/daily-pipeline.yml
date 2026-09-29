@@ -1,0 +1,68 @@
+name: Daily sports-arbitrage pipeline
+
+on:
+  # Manual runs only for now. Add a schedule (e.g. daily 01:00 UTC = 09:00 HKT)
+  # once the owner approves automated runs:
+  # schedule:
+  #   - cron: "0 1 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: sports-arb-pipeline
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      TRADING_MODE: paper
+      ENABLE_LIVE_TRADING: "false"
+      TRADING_DRY_RUN: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Run pipeline
+        run: bash scripts/ci_run.sh
+
+      - name: Commit results (journals + comparison + opportunities)
+        run: |
+          git config user.name "sports-arb-bot"
+          git config user.email "sports-arb-bot@users.noreply.github.com"
+          git add data/directional_arbitrage.json data/arbitrage_comparison.json data/trading/ 2>/dev/null || true
+          git diff --cached --quiet || git commit -m "Daily pipeline results $(date -u +%F)"
+          git push || echo "nothing to push"
+
+      - name: Upload dashboard artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dashboard/
+
+  deploy-pages:
+    needs: pipeline
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
