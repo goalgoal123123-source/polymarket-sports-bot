@@ -3,18 +3,26 @@
 Reads:
   data/directional_arbitrage.json   opportunities detected by run_arbitrage_detection.py
   data/arbitrage_data.json          market metadata (joined for human-readable questions)
-  data/trading/*.jsonl + state.json paper-trading journals
+  data/trading/*.jsonl + state.json paper-trading journals (full mode only)
 
 Writes:
   dashboard/index.html              fully self-contained page, published to GitHub Pages
+
+Modes:
+  default      full dashboard with paper-trading sections
+  --lite       analysis-only: no paper-trading sections, no trading journals read
 """
 from __future__ import annotations
 
+import argparse
 import html
 import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+HKT = ZoneInfo("Asia/Hong_Kong")
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
@@ -83,6 +91,12 @@ def build_market_index():
 
 
 def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--lite", action="store_true",
+                    help="Analysis-only dashboard: hide all paper-trading sections.")
+    args = ap.parse_args()
+    lite = args.lite
+
     opportunities = load_json(DATA / "directional_arbitrage.json", [])
     if isinstance(opportunities, dict):
         opportunities = opportunities.get("opportunities", opportunities.get("data", []))
@@ -112,22 +126,26 @@ def main() -> None:
             }
         )
 
-    # Paper trading journals
-    trading_dir = DATA / "trading"
-    signals = load_jsonl(trading_dir / "signals.jsonl")
-    orders = load_jsonl(trading_dir / "orders.jsonl")
-    fills = load_jsonl(trading_dir / "fills.jsonl")
-    positions = load_jsonl(trading_dir / "positions.jsonl")
-    risk_events = load_jsonl(trading_dir / "risk_events.jsonl")
-    state = load_json(trading_dir / "state.json", {})
+    # Paper trading journals (skipped entirely in lite mode)
+    if lite:
+        signals, orders, fills, positions, risk_events, state = [], [], [], [], [], {}
+        open_list = []
+    else:
+        trading_dir = DATA / "trading"
+        signals = load_jsonl(trading_dir / "signals.jsonl")
+        orders = load_jsonl(trading_dir / "orders.jsonl")
+        fills = load_jsonl(trading_dir / "fills.jsonl")
+        positions = load_jsonl(trading_dir / "positions.jsonl")
+        risk_events = load_jsonl(trading_dir / "risk_events.jsonl")
+        state = load_json(trading_dir / "state.json", {})
 
-    # Open positions: last snapshot per market from positions journal
-    open_pos = {}
-    for p in positions:
-        key = str(p.get("market_id") or p.get("condition_id") or p.get("id") or "")
-        if key:
-            open_pos[key] = p
-    open_list = [p for p in open_pos.values() if float(p.get("shares") or p.get("size") or 0) != 0]
+        # Open positions: last snapshot per market from positions journal
+        open_pos = {}
+        for p in positions:
+            key = str(p.get("market_id") or p.get("condition_id") or p.get("id") or "")
+            if key:
+                open_pos[key] = p
+        open_list = [p for p in open_pos.values() if float(p.get("shares") or p.get("size") or 0) != 0]
 
     def slim(entries, fields, limit=80):
         out = []
@@ -154,7 +172,51 @@ def main() -> None:
     }
 
     data_json = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
-    now_hkt = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
+    now_hkt = datetime.now(HKT).strftime("%Y-%m-%d %H:%M")
+
+    if lite:
+        badge = "機會掃描"
+        update_note = "（手動觸發更新）"
+        disclaimer = "⚠️ 純數據分析，只供研究參考，唔構成任何投資建議。本版本不設任何交易功能（連紙交易都冇）。"
+        paper_sections = ""
+        paper_js = ""
+        cards_js = (
+            '  [D.stats.n_opportunities, "方向性機會"],\n'
+            '  [pct(D.stats.max_edge), "最高邊際"],\n'
+            '  [D.stats.n_signals, "訊號總數"],'
+        )
+    else:
+        badge = "PAPER 紙交易"
+        update_note = "（手動觸發更新）"
+        disclaimer = "⚠️ 紙上模擬交易，只供研究參考，唔構成任何投資建議。真實交易功能已被鎖定（paper mode）。"
+        paper_sections = """
+<h2>📒 紙交易 — 持倉</h2>
+<div class="wrap"><table><thead><tr><th>市場</th><th>方向</th><th class="num">數量</th><th class="num">均價</th><th>狀態</th></tr></thead>
+<tbody id="pos"></tbody></table></div>
+
+<h2>🧾 紙交易 — 最近成交</h2>
+<div class="wrap"><table><thead><tr><th>時間</th><th>市場</th><th>方向</th><th class="num">價</th><th class="num">數量</th></tr></thead>
+<tbody id="fills"></tbody></table></div>
+"""
+        paper_js = """document.getElementById("pos").innerHTML = D.positions.map(p => `
+<tr><td>${esc(p.market_id)}</td><td>${esc(p.outcome || p.side)}</td>
+<td class="num">${p.shares ?? p.size ?? "-"}</td><td class="num">${p.avg_price ?? p.entry_price ?? "-"}</td>
+<td>${esc(p.status || "open")}</td></tr>`).join("")
+|| `<tr><td colspan="5" style="color:var(--dim)">暫無持倉</td></tr>`;
+
+document.getElementById("fills").innerHTML = D.fills.slice().reverse().map(f => `
+<tr><td>${esc(f.timestamp || f.time || "")}</td><td>${esc(f.market_id)}</td>
+<td>${esc(f.side || f.outcome)}</td><td class="num">${f.price ?? "-"}</td>
+<td class="num">${f.shares ?? f.size ?? "-"}</td></tr>`).join("")
+|| `<tr><td colspan="5" style="color:var(--dim)">暫無成交記錄</td></tr>`;"""
+        cards_js = (
+            '  [D.stats.n_opportunities, "方向性機會"],\n'
+            '  [pct(D.stats.max_edge), "最高邊際"],\n'
+            '  [D.stats.n_signals, "訊號總數"],\n'
+            '  [D.stats.n_fills, "紙成交"],\n'
+            '  [D.stats.n_open_positions, "未平倉"],\n'
+            '  [D.stats.n_risk_denied, "風控否決"],'
+        )
 
     page = """<!DOCTYPE html>
 <html lang="zh-Hant">
@@ -181,9 +243,9 @@ a{{color:var(--acc)}}
 </style>
 </head>
 <body>
-<h1>Polymarket Sports 套利機械人 <span class="badge">PAPER 紙交易</span></h1>
-<div class="meta">數據更新：__NOW_HKT__（每日自動更新）｜ Polymarket 價格 vs 莊家賠率方向性機會</div>
-<div class="warn">⚠️ 紙上模擬交易，只供研究參考，唔構成任何投資建議。真實交易功能已被鎖定（paper mode）。</div>
+<h1>Polymarket Sports 套利機械人 <span class="badge">__BADGE__</span></h1>
+<div class="meta">數據更新：__NOW_HKT____UPDATE_NOTE__｜ Polymarket 價格 vs 莊家賠率方向性機會</div>
+<div class="warn">__DISCLAIMER__</div>
 
 <h2>📊 概覽</h2>
 <div class="cards" id="cards"></div>
@@ -193,14 +255,7 @@ a{{color:var(--acc)}}
 <th>賽事</th><th>方向</th><th class="num">PM 價</th><th class="num">莊家隱含</th>
 <th class="num">邊際</th><th class="num">信心</th><th class="num">莊家數</th><th class="num">流動性</th>
 </tr></thead><tbody id="opps"></tbody></table></div>
-
-<h2>📒 紙交易 — 持倉</h2>
-<div class="wrap"><table><thead><tr><th>市場</th><th>方向</th><th class="num">數量</th><th class="num">均價</th><th>狀態</th></tr></thead>
-<tbody id="pos"></tbody></table></div>
-
-<h2>🧾 紙交易 — 最近成交</h2>
-<div class="wrap"><table><thead><tr><th>時間</th><th>市場</th><th>方向</th><th class="num">價</th><th class="num">數量</th></tr></thead>
-<tbody id="fills"></tbody></table></div>
+__PAPER_SECTIONS__
 
 <div class="foot">
 數據來源：Polymarket 官方 Gamma API（市場數據）＋ The Odds API（第三方莊家賠率）。<br>
@@ -215,12 +270,7 @@ const pct = x => (x === null || x === undefined || x === "" || isNaN(+x)) ? "-" 
 const money = x => (x === null || x === undefined || x === "" || isNaN(+x)) ? "-" : "$" + (+x).toLocaleString("en-US", {maximumFractionDigits: 0});
 
 document.getElementById("cards").innerHTML = [
-  [D.stats.n_opportunities, "方向性機會"],
-  [pct(D.stats.max_edge), "最高邊際"],
-  [D.stats.n_signals, "訊號總數"],
-  [D.stats.n_fills, "紙成交"],
-  [D.stats.n_open_positions, "未平倉"],
-  [D.stats.n_risk_denied, "風控否決"],
+__CARDS_JS__
 ].map(([v, l]) => `<div class="card"><div class="v">${v}</div><div class="l">${l}</div></div>`).join("");
 
 document.getElementById("opps").innerHTML = D.opportunities.slice(0, 30).map(o => `
@@ -230,26 +280,24 @@ document.getElementById("opps").innerHTML = D.opportunities.slice(0, 30).map(o =
 <td class="num">${o.books ?? "-"}</td><td class="num">${money(o.liquidity)}</td></tr>`).join("")
 || `<tr><td colspan="8" style="color:var(--dim)">今次運行未搵到符合閾值嘅機會</td></tr>`;
 
-document.getElementById("pos").innerHTML = D.positions.map(p => `
-<tr><td>${esc(p.market_id)}</td><td>${esc(p.outcome || p.side)}</td>
-<td class="num">${p.shares ?? p.size ?? "-"}</td><td class="num">${p.avg_price ?? p.entry_price ?? "-"}</td>
-<td>${esc(p.status || "open")}</td></tr>`).join("")
-|| `<tr><td colspan="5" style="color:var(--dim)">暫無持倉</td></tr>`;
-
-document.getElementById("fills").innerHTML = D.fills.slice().reverse().map(f => `
-<tr><td>${esc(f.timestamp || f.time || "")}</td><td>${esc(f.market_id)}</td>
-<td>${esc(f.side || f.outcome)}</td><td class="num">${f.price ?? "-"}</td>
-<td class="num">${f.shares ?? f.size ?? "-"}</td></tr>`).join("")
-|| `<tr><td colspan="5" style="color:var(--dim)">暫無成交記錄</td></tr>`;
+__PAPER_JS__
 </script>
 </body>
 </html>
 """
-    page = page.replace("__NOW_HKT__", html.escape(now_hkt)).replace("__DATA_JSON__", data_json)
+    page = (page.replace("__NOW_HKT__", html.escape(now_hkt))
+                .replace("__UPDATE_NOTE__", update_note)
+                .replace("__BADGE__", badge)
+                .replace("__DISCLAIMER__", disclaimer)
+                .replace("__PAPER_SECTIONS__", paper_sections)
+                .replace("__CARDS_JS__", cards_js)
+                .replace("__PAPER_JS__", paper_js)
+                .replace("__DATA_JSON__", data_json))
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     (OUT_DIR / "index.html").write_text(page, encoding="utf-8")
+    extra = "" if lite else f", {len(fills)} fills"
     print(f"Dashboard written: {OUT_DIR / 'index.html'} "
-          f"({len(opportunities)} opportunities, {len(fills)} fills)")
+          f"({len(opportunities)} opportunities{extra}, lite={lite})")
 
 
 if __name__ == "__main__":
